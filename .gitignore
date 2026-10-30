@@ -1,0 +1,33 @@
+# 构建产物
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# 前端
+node_modules/
+dist/
+.vite/
+
+# 环境与密钥
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# 日志与临时文件
+*.log
+logs/
+tmp/
+data/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# 系统
+.DS_Store
+Thumbs.db

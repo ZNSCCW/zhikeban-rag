@@ -1,0 +1,91 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: zhikeban-backend
+
+  # ★★ 2026-10-10 补（ENG-012 任务②）：默认激活 `vector-mysql` —— 默认路径 = 一键启动的 MySQL 全栈，
+  #   不依赖外部 Oracle。切 Oracle 主实现时同时给 `VECTOR_STORE=oracle` 与
+  #   `--spring.profiles.active=vector-oracle`（或 `VECTOR_PROFILE=vector-oracle`）。
+  #   两个实现的 Bean 名见 VectorStoreRouter.ORACLE_BEAN / MYSQL_BEAN。
+  profiles:
+    active: ${VECTOR_PROFILE:vector-mysql}
+
+  # ★ 默认路径 = 本机 / docker compose 默认栈内的 MySQL 8.4（ENG-007 任务③）
+  #   compose 侧把 MYSQL_DATABASE 设为 zhikeban，MySQL 容器首次启动时自动建库。
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${DB_HOST:mysql}:${DB_PORT:3306}/${DB_NAME:zhikeban}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: ${DB_USER:zhikeban}
+    password: ${DB_PASSWORD:zhikeban}
+
+  # ★★ 2026-09-26 补（ENG-010）：Flyway 迁移 —— **DDL 的真执行路径**
+  #   此前 pom 无 flyway ⇒ db/migration/** 的 V*.sql 是【死代码】，库里的表其实是 MySQL 容器
+  #   用根 schema.sql 初始化建的，且初始化在 TB-27（Oracle 语法 NUMBER）处报错中止 ⇒ 永远 27/28 张。
+  #   ★ 现在：`V*.sql` **真的被执行**；根 `schema.sql` 退回"人读 / 与概设 §4.4 对照的权威文本"
+  #     （两者表名集合仍须相等 —— `§ENG-009` 的 D4/D5/D11）。
+  #   ★ 按 vendor 选路：MySQL 跑 db/migration/mysql/**（27 张），Oracle 跑 db/migration/oracle/**（TB-27）。
+  flyway:
+    enabled: true
+    locations: classpath:db/migration/{vendor}
+    # ★ 已存在的库（由 docker-entrypoint 初始化建过表）先打基线，避免"表已存在"爆炸；
+    #   空库（compose down -v 后）则从 V1 起**逐步真跑**。
+    baseline-on-migrate: true
+    baseline-version: 0
+    validate-on-migrate: true
+    table: flyway_schema_history
+
+  # ★ DDL 的**人读权威文本**仍是根 `schema.sql`（它同时被 compose 挂给 MySQL 的
+  #   /docker-entrypoint-initdb.d/ 做"首次建库"）。★ 它与 V*.sql 的表名集合必须相等（D4/D5）——
+  #   改表**先改这一份**，再同批用生成器 `work/ENG/probe-eng009/gen-migrations.mjs` 派生 V*.sql。
+  #   这样后端可以在**没有 MySQL** 的情况下被单独编译/起容器（骨架单要求"能起"）。
+
+mybatis-plus:
+  # ★ 向量表不在此处：TB-27/TB-28 由 VectorStore 策略接口决定数据源（概设 §5.3）
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# ★ 向量存储策略开关（概设 §5.3）：mysql = TB-28 兜底（默认，不依赖外部 Oracle）；oracle = TB-27 增强
+zhikeban:
+  vector-store: ${VECTOR_STORE:mysql}
+
+  # ★★ 2026-10-10 补（ENG-012 任务④）：嵌入模型 —— bge-m3 = **1024 维**。
+  #   该值必须与 TB-27 的 `VECTOR(1024)`、TB-28 的 `BLOB(4096)` 与 `dim DEFAULT 1024` **三格同值**
+  #   （详设 §4.3.8：换模型时三处必须在同一个发布里一起改，否则检索侧会拒绝）。
+  embedding:
+    model: ${EMBEDDING_MODEL:bge-m3}
+    dim: 1024
+
+  # ★★ 2026-10-10 补（ENG-012 任务①④）：RAG 链路参数（系统提示 / 温度 / 生成长度上限）
+  rag:
+    system-prompt: "你是课程资料助教。只依据下面编号的片段回答，引用必须写成 [编号] 的形式；片段里没有依据时如实说“资料中未找到依据”。"
+    temperature: 0.2
+    max-tokens: 512
+
+  # ★★ 2026-10-10 补（ENG-012 任务③）：生成侧降级链的供方配置
+  #   ① 本地优先 = Ollama（models 按序尝试：先 7b、拉不动退 3b）
+  #   ② API 备选 = OpenAI 兼容端点（api-key 为空 ⇒ healthy() 直接为假，链走到第三级）
+  #   ③ 全文检索兜底（不需要配置）
+  llm:
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://127.0.0.1:11434}
+      models: "qwen2.5:7b,qwen2.5:3b"
+      timeout-ms: 120000
+    openai:
+      base-url: ${OPENAI_BASE_URL:https://api.openai.com}
+      api-key: ${OPENAI_API_KEY:}
+      model: ${OPENAI_MODEL:gpt-4o-mini}
+      timeout-ms: 60000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

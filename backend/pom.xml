@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  智课伴毕设 · 后端骨架（ENG-007 任务①）
+
+  技术栈（依据 shared/FACTS.md §七）：
+    · Java 21 LTS（<java.version>21</java.version>）
+    · Spring Boot 3.5.x（<version>3.5.4</version>）
+    · Spring Security（真实引用见 src/main/java/**/config/SecurityConfig.java）
+    · MyBatis-Plus（真实引用见 src/main/java/**/BisheApplication.java 的 @MapperScan
+      与 domain/entity/User.java 的 @TableName/@TableId/@TableField）
+  ★ 本单为「可空实现」骨架：不写业务功能，只要求"能编译、能起、目录结构清晰"。
+  ★ G4：本单"能编译"的机器判据落在 C 组（backend 服务能被 docker compose up 起来），
+    不另加依赖联网的本地 mvn 断言。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.5.4</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>com.zhikeban</groupId>
+  <artifactId>zhikeban-backend</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <name>zhikeban-backend</name>
+  <description>智课伴毕设 · 后端骨架（Spring Boot 3.5.x + Spring Security + MyBatis-Plus）</description>
+
+  <properties>
+    <java.version>21</java.version>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <mybatis-plus.version>3.5.7</mybatis-plus.version>
+    <!-- ★ 显式钉版本：本机 ~/.m2 只缓存到 8.3.0（Spring Boot 3.5.4 的 BOM 托管值是 9.x） -->
+    <mysql-connector.version>8.3.0</mysql-connector.version>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.baomidou</groupId>
+      <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+      <version>${mybatis-plus.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.mysql</groupId>
+      <artifactId>mysql-connector-j</artifactId>
+      <version>${mysql-connector.version}</version>
+      <scope>runtime</scope>
+    </dependency>
+    <!-- ★★ 2026-09-26 补（ENG-010）：Flyway —— 这是让 `db/migration/**` 的 V*.sql
+         **真的被执行**的唯一途径。此前 pom 里没有 flyway ⇒ 那 7 份 V*.sql 是【死代码】：
+         库里那 27 张表其实是 MySQL 容器用根 `schema.sql` 初始化建的，且初始化在
+         TB-27（Oracle 语法 `NUMBER`）处报错中止 ⇒ 永远少 1 张表（28 → 27）。
+         ★ 两条都要：`flyway-core` ＋ `flyway-mysql`（MySQL 方言在 Flyway 10.x 里是独立模块）。 -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-mysql</artifactId>
+    </dependency>
+    <!-- ★★ 2026-09-26 补（ENG-011）：Reactor —— `LlmClient#stream` 的返回类型 `Flux` 所需
+         （对齐详设 §4.3.2 ⑤ 的既有契约）。★ 本依赖**不写 `<version>`**：版本由
+         `spring-boot-starter-parent`（3.5.4）的 BOM 托管（判据 `D4b`）。 -->
+    <dependency>
+      <groupId>io.projectreactor</groupId>
+      <artifactId>reactor-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+      <!-- ★★ 2026-10-10 补（ENG-013）：单元测试覆盖率 —— jacoco-maven-plugin。
+           两个 goal 都要（判据 J2）：
+             · prepare-agent：给 surefire 挂 JaCoCo agent（否则只有 .exec 没有报告）
+             · report       ：把 .exec 转成 target/site/jacoco/{jacoco.csv,jacoco.xml,index.html}
+           ★ report 显式绑到 `test` 相位：本单的复跑命令就是 `mvn test`
+             （默认绑 `verify` ⇒ 只跑 `mvn test` 不产报告，数字就没有可核来源）。
+           ★★ 刻意**不声明** <minimum> 门槛：任务书要求的是"结果 >60%"，
+             强行设门槛会让"未达标 ⇒ 构建失败"变成构建问题（§ENG-013 P-4 采甲）。
+             实测覆盖率一律从 jacoco.csv 读，写进 docs/测试报告.md 的实测值必须与它逐条对账。 -->
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>0.8.12</version>
+        <executions>
+          <execution>
+            <id>prepare-agent</id>
+            <goals>
+              <goal>prepare-agent</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>test</phase>
+            <goals>
+              <goal>report</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

@@ -1,0 +1,207 @@
+# ============================================================================
+# 智课伴毕设 · 一键启动（docker-compose.yml）
+# ----------------------------------------------------------------------------
+# 依据：docs/概要设计说明书.md §5.3 部署视图（默认模式 = MySQL 8.4 全栈，不依赖外部 Oracle）
+#
+# ★★ 默认路径（不激活任何 profile）＝ {mysql, redis, backend, frontend}
+#      · MySQL 8.4 业务库（TB-01 ~ TB-26 与兜底向量表 TB-28）
+#      · Redis 缓存、后端 Spring Boot 骨架、前端 Vue3 静态站
+#      ⇒ **一条命令起全栈、不碰 Oracle**：docker compose up -d --build
+#   ★ 可选叠加（不激活就不建）：minio / nginx —— 见下方同名服务（`profiles: ["storage"]`
+#     ／`profiles: ["proxy"]`）。它们不属默认路径，是为了让默认路径**零外部前置**。
+#
+# ★★ Oracle 是【可选增强】，只在激活 profile 时出现：
+#        docker compose --profile oracle up -d
+#      它**不是默认路径的前置**（默认集合里没有它 ⇒ 不装 Oracle 也能把全栈跑起来）。
+#      Oracle 侧建的是 TB-27（概设 §4.4.2 的 material_chunk_vector，原生 VECTOR 索引）。
+#
+# ★ 冒烟断言的落点（§ENG-007 的 C 组）：
+#      .tools/eng007-smoke.mjs  —— 探前置（docker info）→ compose config → up → 健康检查 → curl
+#      结果文件                —— .smoke/eng007-smoke.json
+#   ★ 前置条件：**Docker 守护进程必须在跑**。不可用时脚本必须如实出口
+#     `ENVIRONMENT_BLOCKED`（+ 非空 blocked_reason/remediation），**不得**写成技术失败。
+#
+# ★ 用法（常用）：
+#      docker compose up -d --build          # 默认全栈
+#      docker compose ps                     # 看健康
+#      curl -fsS http://localhost:8080/api/health
+#      docker compose down                   # 停（加 -v 连数据卷一起删）
+# ============================================================================
+
+name: zhikeban
+
+services:
+
+  # ── 业务库：MySQL 8.4（TB-01 ~ TB-26 与 TB-28；默认路径的核心）──────────────
+  mysql:
+    image: mysql:8.4
+    container_name: zhikeban-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-zhikeban}
+      MYSQL_USER: ${MYSQL_USER:-zhikeban}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-zhikeban}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+08:00
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+      # ★★ 2026-09-26（ENG-010）**移除**了 `./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro`：
+      #   实测该挂载是【问题源】—— schema.sql 含 Oracle 侧 TB-27（`NUMBER`/`VECTOR`）语法，
+      #   MySQL 初始化到那里 **ERROR 1064 中止**（日志 line 547）⇒ ① 库里只落 27/28 张；
+      #   ② 更要命的是**首次启动时初始化未结束 ⇒ 健康检查失败 ⇒ backend 因 depends_on 起不来**。
+      #   ⇒ 现在 **DDL 的执行唯一路径 = 后端 Flyway**（`db/migration/{vendor}/`，见 backend 的
+      #     `application.yml` 的 `spring.flyway.locations`）；根 `schema.sql` 退回
+      #     "**人读 / 与概设 §4.4 对照的权威文本**"（两者表名集合仍须相等 —— `§ENG-009` D4/D5/D11）。
+      #   ★ 建库仍由 MySQL 镜像用 `MYSQL_DATABASE` 完成（不需要脚本）。
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h127.0.0.1 -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks: [zhikeban]
+
+  # ── 缓存：Redis 7 ─────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: zhikeban-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [zhikeban]
+
+  # ── 后端：Spring Boot 3.5.x 骨架（ENG-007 任务①的"能编译、能起"落点）───────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: zhikeban-backend:0.1.0
+    container_name: zhikeban-backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_NAME: ${MYSQL_DATABASE:-zhikeban}
+      DB_USER: ${MYSQL_USER:-zhikeban}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-zhikeban}
+      # ★ 默认走 MySQL 兜底向量表（TB-28）；切 oracle 需同时激活 --profile oracle
+      VECTOR_STORE: ${VECTOR_STORE:-mysql}
+      TZ: Asia/Shanghai
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    networks: [zhikeban]
+
+  # ── 前端：Vue3 + Vite 骨架（Nginx 托管构建产物）───────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: zhikeban-frontend:0.1.0
+    container_name: zhikeban-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+    environment:
+      VITE_API_TARGET: http://backend:8080
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    networks: [zhikeban]
+
+  # ── 对象存储：MinIO（资料原文件）—— ★ 可选（`--profile storage`）────────────
+  #    ★ 不进默认路径：骨架单的默认栈要**零外部前置**，MinIO 只在需要对象存储时启用。
+  minio:
+    image: minio/minio:latest
+    container_name: zhikeban-minio
+    restart: unless-stopped
+    profiles: ["storage"]
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    networks: [zhikeban]
+
+  # ── 反向代理：Nginx —— ★ 可选（`--profile proxy`）─────────────────────────
+  #    ★ 配好 `nginx/default.conf` 后再启用；默认路径不用它（前端容器自己就对外）。
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: zhikeban-nginx
+    restart: unless-stopped
+    profiles: ["proxy"]
+    depends_on:
+      backend:
+        condition: service_started
+      frontend:
+        condition: service_started
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [zhikeban]
+
+  # ── ★★ 可选增强：Oracle Database 23ai Free（TB-27 的原生 VECTOR 索引）──────
+  #    ★ 只在 `--profile oracle` 时创建 ⇒ **默认集合里没有它**
+  #      （默认路径的 mysql/redis/backend/frontend/minio/nginx 都不依赖它）。
+  #    ★ 想让后端真正走它：--profile oracle + 环境变量 VECTOR_STORE=oracle，
+  #      并把 TB-27 的 DDL（schema.sql §1 的 Oracle 段）在 Oracle 侧执行一次。
+  #    ★ 官方镜像较大且首次启动慢（分钟级），这是它**不进默认路径**的现实理由之一。
+  oracle:
+    image: container-registry.oracle.com/database/free:23.5.0.0
+    container_name: zhikeban-oracle
+    restart: unless-stopped
+    profiles: ["oracle"]
+    environment:
+      ORACLE_PWD: ${ORACLE_PWD:-OraclePwd123}
+      ORACLE_CHARACTERSET: AL32UTF8
+      TZ: Asia/Shanghai
+    ports:
+      - "${ORACLE_PORT:-1521}:1521"
+    volumes:
+      - oracle_data:/opt/oracle/oradata
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'select 1 from dual;' | sqlplus -s system/$$ORACLE_PWD@localhost:1521/FREEPDB1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 180s
+    networks: [zhikeban]
+
+volumes:
+  db_data:
+  redis_data:
+  minio_data:
+  oracle_data:
+
+networks:
+  zhikeban:
+    driver: bridge
